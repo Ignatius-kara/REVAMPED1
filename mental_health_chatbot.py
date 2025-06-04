@@ -1,73 +1,119 @@
+import streamlit as st
 import json
-import numpy as np
+import re
+from datetime import datetime
 import pandas as pd
-import torch
-from transformers import BertTokenizer, BertForSequenceClassification
-from sklearn.preprocessing import MultiLabelBinarizer
 
-# Load the dataset to map predictions to responses
-with open("fine_tune_mental_health_5000_dataset.jsonl", "r") as f:
-    data = [json.loads(line) for line in f]
-df = pd.DataFrame(data)
+# Load the dataset
+@st.cache_data
+def load_dataset():
+    dataset = []
+    with open("optimized_mental_health_chatbot_dataset.jsonl", "r") as f:
+        for line in f:
+            dataset.append(json.loads(line))
+    return dataset
 
-# Load the trained model and tokenizer
-model = BertForSequenceClassification.from_pretrained("./mental_health_model")
-tokenizer = BertTokenizer.from_pretrained("./mental_health_model")
+# Match user input to an intent
+def match_intent(user_message, dataset):
+    user_message = user_message.lower().strip()
+    for entry in dataset:
+        # Check if user message matches any pattern for the intent
+        patterns = [entry["user_message"].lower()]  # Simplified pattern matching
+        for pattern in patterns:
+            if re.search(r'\b' + re.escape(pattern) + r'\b', user_message):
+                return entry
+    # Default fallback if no match is found
+    return {
+        "intent": "default",
+        "chatbot_response": "I’m here to help. Can you tell me more?",
+        "emotion": "neutral",
+        "suggested_action": "inquire"
+    }
 
-# Load the label encoder
-mlb_classes = np.load("label_encoder.npy", allow_pickle=True)
-mlb = MultiLabelBinarizer()
-mlb.fit([mlb_classes])
+# Log user feedback for continuous learning
+def log_feedback(user_message, response, rating):
+    feedback_entry = {
+        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "user_message": user_message,
+        "chatbot_response": response,
+        "user_feedback_rating": rating
+    }
+    with open("feedback_log.jsonl", "a") as f:
+        f.write(json.dumps(feedback_entry) + "\n")
 
-# Function to predict labels for a user message
-def predict_labels(user_message):
-    encoding = tokenizer(
-        user_message,
-        add_special_tokens=True,
-        max_length=128,
-        padding="max_length",
-        truncation=True,
-        return_tensors="pt",
+# Streamlit app
+def main():
+    st.set_page_config(page_title="Pandora - Mental Health Chatbot", layout="centered")
+    
+    # Styling for accessibility
+    st.markdown(
+        """
+        <style>
+        .stTextInput > div > div > input {
+            font-size: 18px;
+        }
+        .stButton > button {
+            font-size: 18px;
+            background-color: #4CAF50;
+            color: white;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True
     )
 
-    with torch.no_grad():
-        outputs = model(**encoding)
-        logits = outputs.logits
-        preds = torch.sigmoid(logits).numpy()
+    st.title("Pandora - Your Mental Health Companion")
+    st.write("Hello! I’m Pandora, here to support you with a caring and empathetic ear. How can I help you today?")
 
-    # Apply threshold to get multi-label predictions
-    threshold = 0.5
-    predicted_labels = (preds > threshold).astype(int)
-    labels = mlb.inverse_transform(predicted_labels)[0]
-    return labels
+    # Initialize session state for conversation history
+    if "conversation" not in st.session_state:
+        st.session_state.conversation = []
+    if "user_input" not in st.session_state:
+        st.session_state.user_input = ""
+    if "awaiting_feedback" not in st.session_state:
+        st.session_state.awaiting_feedback = False
+    if "last_response" not in st.session_state:
+        st.session_state.last_response = ""
 
-# Function to map predicted labels to a chatbot response
-def get_response(user_message, predicted_labels):
-    intent, emotion, suggested_action = predicted_labels
+    # Load dataset
+    dataset = load_dataset()
 
-    # Filter dataset for similar intent, emotion, and suggested action
-    filtered_df = df[
-        (df["intent"] == intent) &
-        (df["emotion"] == emotion) &
-        (df["suggested_action"] == suggested_action)
-    ]
+    # Display conversation history
+    for message in st.session_state.conversation:
+        if message["sender"] == "user":
+            st.markdown(f"**You:** {message['text']}")
+        else:
+            st.markdown(f"**Pandora:** {message['text']}")
 
-    # If a match is found, return the most common response
-    if not filtered_df.empty:
-        return filtered_df["chatbot_response"].mode()[0]
-    else:
-        # Fallback response if no match is found
-        return "I'm here to help. Can you tell me more about how you're feeling?"
+    # User input
+    user_message = st.text_input("Type your message here:", key="user_input", placeholder="e.g., I feel sad today...")
 
-# Main function to process user input
-def process_user_input(user_message):
-    predicted_labels = predict_labels(user_message)
-    response = get_response(user_message, predicted_labels)
-    return response
+    if st.button("Send") and user_message:
+        # Add user message to conversation
+        st.session_state.conversation.append({"sender": "user", "text": user_message})
 
-# Example usage
+        # Match intent and get response
+        matched_entry = match_intent(user_message, dataset)
+        response = matched_entry["chatbot_response"]
+
+        # Add bot response to conversation
+        st.session_state.conversation.append({"sender": "bot", "text": response})
+        st.session_state.last_response = response
+        st.session_state.awaiting_feedback = True
+
+        # Refresh the page to show the new messages
+        st.rerun()
+
+    # Collect feedback if a response was just given
+    if st.session_state.awaiting_feedback:
+        st.write("How helpful was my response? (1 = Not helpful, 5 = Very helpful)")
+        feedback = st.slider("Rate my response:", 1, 5, 3, key="feedback_slider")
+        if st.button("Submit Feedback"):
+            # Log feedback
+            log_feedback(st.session_state.conversation[-2]["text"], st.session_state.last_response, feedback)
+            st.session_state.awaiting_feedback = False
+            st.write("Thank you for your feedback! How can I assist you next?")
+            st.rerun()
+
 if __name__ == "__main__":
-    user_input = "I feel like I'm not good enough."
-    response = process_user_input(user_input)
-    print(f"User: {user_input}")
-    print(f"Chatbot: {response}")
+    main()
