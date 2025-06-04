@@ -14,6 +14,19 @@ import hashlib
 import time
 from textblob import TextBlob
 import pickle
+import nltk
+import os
+
+# Download NLTK data on first run
+try:
+    nltk.data.find('tokenizers/punkt')
+except LookupError:
+    nltk.download('punkt', quiet=True)
+
+try:
+    nltk.data.find('corpora/brown')
+except LookupError:
+    nltk.download('brown', quiet=True)
 
 # Page configuration
 st.set_page_config(
@@ -119,13 +132,21 @@ def initialize_session_state():
 @st.cache_data(ttl=300, max_entries=100)  # Cache for 5 minutes, max 100 entries
 def get_system_memory_info():
     """Get system memory information with caching"""
-    memory = psutil.virtual_memory()
-    return {
-        'total': round(memory.total / (1024**3), 2),
-        'available': round(memory.available / (1024**3), 2),
-        'used': round(memory.used / (1024**3), 2),
-        'percent': memory.percent
-    }
+    try:
+        memory = psutil.virtual_memory()
+        return {
+            'total': round(memory.total / (1024**3), 2),
+            'available': round(memory.available / (1024**3), 2),
+            'used': round(memory.used / (1024**3), 2),
+            'percent': memory.percent
+        }
+    except Exception:
+        return {
+            'total': 0,
+            'available': 0,
+            'used': 0,
+            'percent': 0
+        }
 
 @lru_cache(maxsize=128)
 def hash_text(text):
