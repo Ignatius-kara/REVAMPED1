@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -16,8 +17,16 @@ from textblob import TextBlob
 import pickle
 import sqlite3
 from contextlib import contextmanager
-from passlib.hash import bcrypt
-from transformers import pipeline
+try:
+    from passlib.hash import bcrypt
+except ImportError:
+    st.error("passlib module not found. Please ensure it is installed.")
+    st.stop()
+try:
+    from transformers import pipeline
+except ImportError:
+    st.warning("Transformers not available; using TextBlob for sentiment analysis.")
+    pipeline = None
 import os
 import logging
 
@@ -60,6 +69,29 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
+# Default dataset if file is missing
+DEFAULT_DATASET = [
+    {"user": "I'm feeling anxious", "response": "I'm here to help. Try a deep breathing exercise: inhale for 4, hold for 4, exhale for 6."},
+    {"user": "I'm sad today", "response": "I'm sorry to hear that. Would you like to share more about what's going on?"}
+]
+
+# Load dataset with fallback
+@st.cache_data
+def load_dataset():
+    try:
+        dataset = []
+        with open("optimized_mental_health_chatbot_dataset.jsonl", "r") as f:
+            for line in f:
+                dataset.append(json.loads(line))
+        logger.info("Dataset loaded successfully")
+        return dataset
+    except FileNotFoundError:
+        logger.warning("Dataset file not found; using default dataset")
+        return DEFAULT_DATASET
+    except Exception as e:
+        logger.error(f"Error loading dataset: {e}")
+        return DEFAULT_DATASET
+
 # Database connection pooling
 @contextmanager
 def get_db_connection():
@@ -83,6 +115,9 @@ def init_db():
 # Initialize lightweight NLP model for deployment
 @st.cache_resource
 def init_nlp_model():
+    if pipeline is None:
+        logger.warning("Transformers not available; using TextBlob fallback")
+        return None
     try:
         return pipeline("sentiment-analysis", model="distilbert-base-uncased-finetuned-sst-2-english")
     except Exception as e:
@@ -93,7 +128,7 @@ def init_nlp_model():
 def initialize_session_state():
     defaults = {
         'messages': [],
-        'mood_data': pd.DataFrame(columns=['timestamp', 'mood', 'stress', 'category']),
+        'mood_data': pd.DataFrame(columns=['timestamp', 'mood', 'stress', 'category'], dtype=object),
         'conversation_count': 0,
         'user_name': '',
         'current_mood': 3,
@@ -158,17 +193,15 @@ def save_user_data(username):
     try:
         with get_db_connection() as conn:
             c = conn.cursor()
-            # Batch insert mood data
             mood_data_tuples = [
                 (username, row['timestamp'], row['mood'], row['stress'], row['category'])
-                for _, row in st.session_state.mood_data.tail(10).iterrows()  # Only save last 10 entries
+                for _, row in st.session_state.mood_data.tail(10).iterrows()
             ]
             c.executemany("INSERT OR REPLACE INTO mood_data VALUES (?, ?, ?, ?, ?)", mood_data_tuples)
             
-            # Batch insert chat history
             chat_tuples = [
                 (username, datetime.now(), msg['role'], msg['content'])
-                for msg in st.session_state.messages[-10:]  # Only save last 10 messages
+                for msg in st.session_state.messages[-10:]
             ]
             c.executemany("INSERT OR REPLACE INTO chat_history VALUES (?, ?, ?, ?)", chat_tuples)
             
@@ -180,8 +213,8 @@ def save_user_data(username):
 def backup_session():
     try:
         backup_data = {
-            'messages': st.session_state.messages[-50:],  # Limit to last 50 messages
-            'mood_data': st.session_state.mood_data.tail(100).to_dict(),  # Limit to last 100 entries
+            'messages': st.session_state.messages[-50:],
+            'mood_data': st.session_state.mood_data.tail(100).to_dict(),
             'conversation_count': st.session_state.conversation_count,
             'current_mood': st.session_state.current_mood,
             'crisis_detected': st.session_state.crisis_detected
@@ -222,7 +255,6 @@ def analyze_mood_from_text(text, _nlp_model):
             result = _nlp_model(text)[0]
             sentiment_score = result['score'] if result['label'] == 'POSITIVE' else -result['score']
         else:
-            # Fallback to TextBlob if NLP model fails
             blob = TextBlob(text.lower())
             sentiment_score = blob.sentiment.polarity
         
@@ -309,7 +341,6 @@ def get_system_memory_info():
         logger.error(f"Memory info error: {e}")
         return {'total': 0, 'available': 0, 'used': 0, 'percent': 0}
 
-# Other existing functions (simplified for brevity)
 @lru_cache(maxsize=128)
 def hash_text(text):
     return hashlib.md5(text.encode()).hexdigest()
@@ -368,6 +399,7 @@ def optimize_memory():
             st.cache_data.clear()
             st.session_state.cache_hits = 0
         st.session_state.memory_optimized = True
+        logger.info("Memory optimized")
 
 def categorize_conversation(message):
     categories = {
@@ -395,7 +427,7 @@ def detect_crisis(message):
 def get_ai_response(message, mood_score, stress_score, category):
     st.session_state.cache_hits += 1
     base_responses = {
-        'anxiety': ["Let's try a quick breathing exercise: inhale for 4, hold for 4, exhale for 6.",],
+        'anxiety': ["Let's try a quick breathing exercise: inhale for 4, hold for 4, exhale for 6."],
         'depression': ["Your feelings are valid. Would you like to share more about what's been going on?"],
         'stress': ["Stress can be tough. What's been the main source of stress for you?"],
         'relationships': ["Relationships can be complex. Would you like to talk about what's happening?"],
@@ -405,7 +437,7 @@ def get_ai_response(message, mood_score, stress_score, category):
     crisis_response = """🚨 **CRISIS SUPPORT** 🚨
     I'm concerned about what you've shared. Please reach out for help:
     • National Suicide Prevention Lifeline: 988
-    • Crisis Text Line: Text HOME to 741741
+    • Crisis Text Line: Text HOME TO 741741
     • Emergency Services: 911"""
     
     if detect_crisis(message):
@@ -420,8 +452,11 @@ def log_mood_data(mood, stress, category):
         'mood': [mood],
         'stress': [stress],
         'category': [category]
-    })
-    st.session_state.mood_data = pd.concat([st.session_state.mood_data, new_entry], ignore_index=True)
+    }, dtype=str)  # Explicitly set dtype to avoid type mismatches
+    if st.session_state.mood_data.empty:
+        st.session_state.mood_data = new_entry
+    else:
+        st.session_state.mood_data = pd.concat([st.session_state.mood_data, new_entry], ignore_index=True)
     if len(st.session_state.mood_data) % 5 == 0:
         optimize_memory()
 
@@ -452,6 +487,7 @@ def main():
     init_db()
     initialize_session_state()
     nlp_model = init_nlp_model()
+    dataset = load_dataset()  # Load dataset with fallback
 
     # Authentication
     if not st.session_state.authenticated:
@@ -669,8 +705,8 @@ def main():
             st.subheader("📋 Recent Mood Entries")
             recent_entries = st.session_state.mood_data.tail(3)
             for _, entry in recent_entries.iterrows():
-                mood_emoji = "😊" if entry['mood'] >= 4 else "😐" if entry['mood'] >= 3 else "😔"
-                stress_emoji = "😌" if entry['stress'] <= 2 else "😰" if entry['stress'] >= 4 else "🤔"
+                mood_emoji = "😊" if float(entry['mood']) >= 4 else "😐" if float(entry['mood']) >= 3 else "😔"
+                stress_emoji = "😌" if float(entry['stress']) <= 2 else "😰" if float(entry['stress']) >= 4 else "🤔"
                 st.write(f"{mood_emoji} {stress_emoji} {entry['timestamp'].strftime('%H:%M')} - {entry['category']}")
         else:
             st.info("Start chatting to see analytics!")
@@ -681,3 +717,4 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Application error: {e}")
         st.error("An error occurred. Please try again or contact support.")
+```
